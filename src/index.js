@@ -12,6 +12,12 @@ import pointsRoutes from './routes/points.js';
 import settingsRoutes from './routes/settings.js';
 import auditLogRoutes from './routes/auditLogs.js';
 import connecteamRoutes from './routes/connecteam.js';
+import programRoutes from './routes/programs.js';
+import notificationRoutes from './routes/notifications.js';
+import reportRoutes from './routes/reports.js';
+import dashboardRoutes from './routes/dashboard.js';
+import pointTransactionRoutes from './routes/pointTransactions.js';
+import adminRoutes from './routes/admins.js';
 
 const app = express();
 const PORT = process.env.PORT || 9000;
@@ -34,6 +40,12 @@ app.use('/api/points', pointsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
 app.use('/api/connecteam', connecteamRoutes);
+app.use('/api/programs', programRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/point-transactions', pointTransactionRoutes);
+app.use('/api/admins', adminRoutes);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

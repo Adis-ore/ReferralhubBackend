@@ -251,3 +251,39 @@ export const connecteamSyncLogs = (() => {
   }
   return logs;
 })();
+
+export const referralPrograms = [
+  { id: 1, name: 'Standard Referral', description: 'Base referral reward for all staff', pointsPerReferral: 500, bonusPoints: 0, isActive: true, startDate: '2024-01-01', endDate: null, minHoursRequired: 40, createdAt: '2024-01-01T00:00:00.000Z', createdBy: 'admin-1', participantCount: 50 },
+  { id: 2, name: 'Nurse Bonus Campaign', description: 'Extra bonus for referring Registered Nurses', pointsPerReferral: 800, bonusPoints: 200, isActive: true, startDate: '2026-01-01', endDate: '2026-06-30', minHoursRequired: 80, createdAt: '2025-12-15T00:00:00.000Z', createdBy: 'admin-1', participantCount: 22 },
+  { id: 3, name: 'Q1 Incentive', description: 'Quarterly referral boost for all classifications', pointsPerReferral: 600, bonusPoints: 100, isActive: false, startDate: '2025-01-01', endDate: '2025-03-31', minHoursRequired: 40, createdAt: '2024-12-20T00:00:00.000Z', createdBy: 'admin-2', participantCount: 38 },
+];
+
+export const adminNotifications = [
+  { id: 1, type: 'withdrawal', priority: 'high', title: 'Withdrawal Pending Approval', message: 'Adewale Johnson has requested a withdrawal of 2000 points', isRead: false, createdAt: new Date(Date.now() - 3600000).toISOString() },
+  { id: 2, type: 'referral', priority: 'medium', title: 'New Referral Submitted', message: 'Chioma Okafor submitted a new referral', isRead: false, createdAt: new Date(Date.now() - 7200000).toISOString() },
+  { id: 3, type: 'system', priority: 'low', title: 'Connecteam Sync Completed', message: '18 hours records imported successfully', isRead: true, createdAt: new Date(Date.now() - 86400000).toISOString() },
+  { id: 4, type: 'points', priority: 'medium', title: 'Points Adjustment', message: 'Points manually adjusted for user Oluwaseun Adebayo', isRead: true, createdAt: new Date(Date.now() - 172800000).toISOString() },
+];
+
+export const staffNotifications = staffUsers.slice(0, 10).flatMap((user, i) => [
+  { id: i * 2 + 1, userId: user.id, type: 'points', title: 'Points Earned', message: `You earned ${user.hourlyRate * 10} points for recent shifts`, isRead: i > 3, createdAt: new Date(Date.now() - i * 86400000).toISOString() },
+  { id: i * 2 + 2, userId: user.id, type: 'referral', title: 'Referral Update', message: 'Your referral has been approved', isRead: i > 5, createdAt: new Date(Date.now() - (i + 1) * 86400000).toISOString() },
+]);
+
+export const pointTransactions = staffUsers.flatMap((user) =>
+  Array.from({ length: Math.min(user.totalReferrals, 5) }, (_, i) => ({
+    id: `PT-${user.id}-${i + 1}`,
+    userId: user.id,
+    type: i % 3 === 0 ? 'withdrawal' : i % 3 === 1 ? 'referral' : 'hours',
+    points: i % 3 === 0 ? -(Math.floor(Math.random() * 500) + 100) : Math.floor(Math.random() * 300) + 50,
+    description: i % 3 === 0 ? 'Points withdrawn' : i % 3 === 1 ? 'Referral bonus awarded' : 'Hours worked reward',
+    status: i % 3 === 0 ? 'completed' : 'completed',
+    createdAt: new Date(Date.now() - i * 7 * 86400000).toISOString(),
+  }))
+);
+
+export const reports = [
+  { id: 1, name: 'Monthly Referral Summary', type: 'referral', schedule: 'monthly', lastRun: '2026-03-01T00:00:00.000Z', nextRun: '2026-04-01T00:00:00.000Z', status: 'active', createdBy: 'admin-1', createdAt: '2025-01-01T00:00:00.000Z' },
+  { id: 2, name: 'Weekly Withdrawal Report', type: 'withdrawal', schedule: 'weekly', lastRun: '2026-03-10T00:00:00.000Z', nextRun: '2026-03-17T00:00:00.000Z', status: 'active', createdBy: 'admin-2', createdAt: '2025-03-01T00:00:00.000Z' },
+  { id: 3, name: 'Points Audit Q1', type: 'points', schedule: 'quarterly', lastRun: '2026-01-01T00:00:00.000Z', nextRun: '2026-04-01T00:00:00.000Z', status: 'active', createdBy: 'admin-1', createdAt: '2025-06-01T00:00:00.000Z' },
+];
