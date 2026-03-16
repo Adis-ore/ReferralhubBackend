@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import cron from 'node-cron';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -11,7 +12,7 @@ import withdrawalRoutes from './routes/withdrawals.js';
 import pointsRoutes from './routes/points.js';
 import settingsRoutes from './routes/settings.js';
 import auditLogRoutes from './routes/auditLogs.js';
-import connecteamRoutes from './routes/connecteam.js';
+import connecteamRoutes, { performSync } from './routes/connecteam.js';
 import programRoutes from './routes/programs.js';
 import notificationRoutes from './routes/notifications.js';
 import reportRoutes from './routes/reports.js';
@@ -79,6 +80,18 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Internal server error' });
 });
+
+// ─── Daily auto-sync (2:00 AM) ────────────────────────────────────────────────
+cron.schedule('0 2 * * *', async () => {
+  console.log('[Cron] Running daily Connecteam sync...');
+  try {
+    const { log, message } = await performSync({ triggeredBy: 'scheduled', adminId: null });
+    console.log(`[Cron] ${message} (${log.recordsImported} imported)`);
+  } catch (err) {
+    console.error('[Cron] Sync failed:', err.message);
+  }
+});
+console.log('[Cron] Daily sync scheduled at 2:00 AM');
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {

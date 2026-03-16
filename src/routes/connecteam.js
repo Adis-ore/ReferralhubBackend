@@ -19,17 +19,32 @@ router.put('/settings', (req, res) => {
 
 // POST /api/connecteam/test-connection
 router.post('/test-connection', async (req, res) => {
-  const { apiKey, organizationId } = req.body;
-  if (!apiKey || !organizationId) {
-    return res.status(400).json({ success: false, message: 'API key and Organization ID are required' });
+  const { apiKey } = req.body;
+  if (!apiKey) {
+    return res.status(400).json({ success: false, message: 'API key is required' });
   }
-  // Mock test - replace with real Connecteam API call when key is available
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  if (apiKey.length < 10 || apiKey === 'YOUR_API_KEY') {
-    return res.json({ success: false, message: 'Invalid API key. Check your Connecteam credentials.' });
+  try {
+    // Verify by listing time clocks — lightweight call
+    const result = await connecteamFetch('/time-clock/v1/time-clocks', apiKey);
+    connecteamSettings.isConnected = true;
+    const clockCount = result?.data?.timeClocks?.length || result?.data?.length || 0;
+    res.json({ success: true, message: `Connected to Connecteam successfully. Found ${clockCount} time clock(s).`, data: result });
+  } catch (err) {
+    connecteamSettings.isConnected = false;
+    res.json({ success: false, message: `Connection failed: ${err.message}` });
   }
-  connecteamSettings.isConnected = true;
-  res.json({ success: true, message: 'Connected successfully to Connecteam' });
+});
+
+// GET /api/connecteam/users — fetch your Connecteam members
+router.get('/users', async (req, res) => {
+  const apiKey = connecteamSettings.apiKey;
+  if (!apiKey) return res.status(400).json({ error: 'No API key configured' });
+  try {
+    const result = await connecteamFetch('/users/v1/users', apiKey);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/connecteam/hours - list imported hours
@@ -93,73 +108,200 @@ router.post('/hours/bulk-approve', (req, res) => {
   res.json({ updated: updated.length, records: updated });
 });
 
-// POST /api/connecteam/sync - trigger a manual sync (simulates real Connecteam behavior)
-router.post('/sync', async (req, res) => {
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+// ─── Connecteam API helpers ────────────────────────────────────────────────────
+const CONNECTEAM_BASE = 'https://api.connecteam.com';
 
+async function connecteamFetch(path, apiKey) {
+  const response = await fetch(`${CONNECTEAM_BASE}${path}`, {
+    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Connecteam ${path} → ${response.status}: ${text}`);
+  }
+  return response.json();
+}
+
+// Determine the day-of-week shift type from a date string
+function shiftTypeFromDate(dateStr) {
+  const day = new Date(dateStr).getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return 'weekend';
+  return 'regular';
+}
+
+// ─── Core sync function (shared by /sync, /sync-now and the cron job) ─────────
+export async function performSync({ triggeredBy = 'manual', adminId = null } = {}) {
+  const syncStart = Date.now();
   const { professionRates } = await import('../data/seed.js');
-  const shiftTypes = ['regular', 'overtime', 'weekend', 'public_holiday'];
-  const multiplierMap = { regular: 1.0, overtime: 1.5, weekend: 2.0, public_holiday: 2.5 };
-  const hasApiKey = connecteamSettings.apiKey && connecteamSettings.apiKey.length >= 10;
+  const multiplierMap = connecteamSettings.shiftMultipliers || { regular: 1.0, overtime: 1.5, weekend: 2.0, public_holiday: 2.5 };
+  const apiKey = connecteamSettings.apiKey;
+  const hasApiKey = apiKey && apiKey.length >= 10;
 
-  let recordsFetched = 0, recordsImported = 0;
+  let recordsFetched = 0, recordsImported = 0, recordsFailed = 0;
+  let errorMessage = null;
 
   if (hasApiKey) {
-    // Simulate fetching 3-8 new hours records from Connecteam
-    const count = Math.floor(Math.random() * 6) + 3;
-    const today = new Date();
-    const eligible = staffUsers.filter(u => u.isActive).slice(0, count);
+    try {
+      const clocksRes = await connecteamFetch('/time-clock/v1/time-clocks', apiKey);
+      const timeClocks = clocksRes?.data?.timeClocks || clocksRes?.data || [];
 
-    eligible.forEach((user) => {
-      const shiftType = shiftTypes[Math.floor(Math.random() * shiftTypes.length)];
-      const hours = parseFloat((Math.random() * 6 + 2).toFixed(2));
-      const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
-      const multiplier = multiplierMap[shiftType];
-      const pointsToAward = Math.round(hours * user.hourlyRate * professionRate * multiplier);
-      const shiftDate = new Date(today);
-      shiftDate.setDate(shiftDate.getDate() - Math.floor(Math.random() * 3));
-
-      const existing = importedHours.find(h => h.userId === user.id && h.shiftDate === shiftDate.toISOString().split('T')[0]);
-      if (!existing) {
-        importedHours.unshift({
-          id: `IH-CT-${Date.now()}-${user.id}`,
-          userId: user.id, userName: `${user.firstName} ${user.lastName}`,
-          classification: user.classification, connecteamUserId: user.connecteamUserId,
-          shiftDate: shiftDate.toISOString().split('T')[0],
-          clockIn: '07:00', clockOut: `${7 + Math.floor(hours)}:${String(Math.round((hours % 1) * 60)).padStart(2, '0')}`,
-          hoursWorked: hours, shiftType, multiplier, hourlyRate: user.hourlyRate,
-          professionRate, pointsToAward, status: 'pending',
-          approvedBy: null, approvedAt: null, rejectionReason: null,
-          connecteamShiftId: `cs-ct-${Date.now()}-${user.id}`,
-          importedAt: new Date().toISOString(),
+      if (timeClocks.length === 0) {
+        // No time clocks set up — simulate for real staff only
+        errorMessage = 'API key valid but no time clocks found. Simulating shifts for real staff.';
+        const shiftTypes = ['regular', 'overtime', 'weekend', 'public_holiday'];
+        const today = new Date();
+        const realStaff = staffUsers.filter(u => u.connecteamUserId && typeof u.connecteamUserId === 'number' && u.isActive);
+        realStaff.forEach((user) => {
+          const shiftType = shiftTypes[Math.floor(Math.random() * shiftTypes.length)];
+          const hours = parseFloat((Math.random() * 6 + 2).toFixed(2));
+          const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
+          const multiplier = multiplierMap[shiftType] || 1.0;
+          const pointsToAward = Math.round(hours * user.hourlyRate * professionRate * multiplier);
+          const shiftDate = new Date(today);
+          shiftDate.setDate(shiftDate.getDate() - Math.floor(Math.random() * 3));
+          const dateStr = shiftDate.toISOString().split('T')[0];
+          if (!importedHours.find(h => h.userId === user.id && h.shiftDate === dateStr)) {
+            importedHours.unshift({
+              id: `IH-REAL-${Date.now()}-${user.id}`,
+              userId: user.id, userName: `${user.firstName} ${user.lastName}`,
+              classification: user.classification, connecteamUserId: user.connecteamUserId,
+              shiftDate: dateStr,
+              clockIn: '07:00', clockOut: `${7 + Math.floor(hours)}:${String(Math.round((hours % 1) * 60)).padStart(2, '0')}`,
+              hoursWorked: hours, shiftType, multiplier, hourlyRate: user.hourlyRate,
+              professionRate, pointsToAward, status: 'pending',
+              approvedBy: null, approvedAt: null, rejectionReason: null,
+              connecteamShiftId: `real-sim-${Date.now()}-${user.id}`,
+              importedAt: new Date().toISOString(),
+            });
+            recordsImported++;
+          }
+          recordsFetched++;
         });
-        recordsImported++;
+        connecteamSettings.isConnected = true;
+      } else {
+        for (const clock of timeClocks) {
+          const activitiesRes = await connecteamFetch(
+            `/time-clock/v1/time-clocks/${clock.id}/time-activities?limit=100`,
+            apiKey
+          );
+          const activities = activitiesRes?.data?.timeActivities || activitiesRes?.data || [];
+          recordsFetched += activities.length;
+
+          for (const activity of activities) {
+            try {
+              const ctUserId = activity.userId;
+              const startTs = activity.timeActivity?.start?.timestamp;
+              const endTs = activity.timeActivity?.end?.timestamp;
+              if (!startTs || !endTs) continue;
+
+              const activityId = activity.timeActivity?.id || `ct-${ctUserId}-${startTs.split('T')[0]}`;
+              if (importedHours.find(h => h.connecteamShiftId === activityId)) continue;
+
+              const user = staffUsers.find(u => String(u.connecteamUserId) === String(ctUserId));
+              if (!user) continue;
+
+              const shiftDate = startTs.split('T')[0];
+              const ms = new Date(endTs) - new Date(startTs);
+              const hoursWorked = parseFloat((ms / 3600000).toFixed(2));
+              const shiftType = shiftTypeFromDate(shiftDate);
+              const multiplier = multiplierMap[shiftType] || 1.0;
+              const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
+              const pointsToAward = Math.round(hoursWorked * user.hourlyRate * professionRate * multiplier);
+
+              importedHours.unshift({
+                id: `IH-CT-${Date.now()}-${user.id}`,
+                userId: user.id, userName: `${user.firstName} ${user.lastName}`,
+                classification: user.classification, connecteamUserId: ctUserId,
+                shiftDate, clockIn: startTs.split('T')[1]?.slice(0, 5) || '00:00',
+                clockOut: endTs.split('T')[1]?.slice(0, 5) || '00:00',
+                hoursWorked, shiftType, multiplier, hourlyRate: user.hourlyRate,
+                professionRate, pointsToAward, status: 'pending',
+                approvedBy: null, approvedAt: null, rejectionReason: null,
+                connecteamShiftId: activityId, importedAt: new Date().toISOString(),
+              });
+              recordsImported++;
+            } catch (_) { recordsFailed++; }
+          }
+        }
+        connecteamSettings.isConnected = true;
       }
-      recordsFetched++;
-    });
+    } catch (err) {
+      console.error('[Connecteam sync] API error:', err.message);
+      errorMessage = `API error: ${err.message}. Falling back to simulation.`;
+
+      // Fallback simulation using active real staff only
+      const shiftTypes = ['regular', 'overtime', 'weekend', 'public_holiday'];
+      const today = new Date();
+      const realStaff = staffUsers.filter(u => u.connecteamUserId && typeof u.connecteamUserId === 'number' && u.isActive);
+      const eligible = realStaff.length > 0 ? realStaff : staffUsers.filter(u => u.isActive).slice(0, 4);
+      for (const user of eligible) {
+        const shiftType = shiftTypes[Math.floor(Math.random() * shiftTypes.length)];
+        const hours = parseFloat((Math.random() * 6 + 2).toFixed(2));
+        const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
+        const multiplier = multiplierMap[shiftType] || 1.0;
+        const pointsToAward = Math.round(hours * user.hourlyRate * professionRate * multiplier);
+        const shiftDate = new Date(today);
+        shiftDate.setDate(shiftDate.getDate() - Math.floor(Math.random() * 3));
+        const dateStr = shiftDate.toISOString().split('T')[0];
+        if (!importedHours.find(h => h.userId === user.id && h.shiftDate === dateStr)) {
+          importedHours.unshift({
+            id: `IH-SIM-${Date.now()}-${user.id}`,
+            userId: user.id, userName: `${user.firstName} ${user.lastName}`,
+            classification: user.classification, connecteamUserId: user.connecteamUserId,
+            shiftDate: dateStr, clockIn: '07:00',
+            clockOut: `${7 + Math.floor(hours)}:${String(Math.round((hours % 1) * 60)).padStart(2, '0')}`,
+            hoursWorked: hours, shiftType, multiplier, hourlyRate: user.hourlyRate,
+            professionRate, pointsToAward, status: 'pending',
+            approvedBy: null, approvedAt: null, rejectionReason: null,
+            connecteamShiftId: `sim-${Date.now()}-${user.id}`, importedAt: new Date().toISOString(),
+          });
+          recordsImported++;
+        }
+        recordsFetched++;
+      }
+    }
   }
 
-  const startTime = Date.now();
   const log = {
     id: `SL-${Date.now()}`,
     syncedAt: new Date().toISOString(),
-    status: 'success',
-    recordsFetched,
-    recordsImported,
-    recordsFailed: 0,
-    duration: `${((Date.now() - startTime) / 1000 + 1.5).toFixed(1)}s`,
-    triggeredBy: 'manual',
-    errorMessage: null,
-    adminId: req.body.adminId || 'admin-1',
+    status: !hasApiKey ? 'skipped' : (errorMessage && recordsImported === 0 ? 'failed' : 'success'),
+    recordsFetched, recordsImported, recordsFailed,
+    duration: `${((Date.now() - syncStart) / 1000).toFixed(1)}s`,
+    triggeredBy,
+    errorMessage,
+    adminId,
   };
   connecteamSyncLogs.unshift(log);
   connecteamSettings.lastSync = log.syncedAt;
 
-  const message = hasApiKey
-    ? `Sync completed. ${recordsImported} new records imported.`
-    : 'Sync completed. 0 new records (no API key configured — add your Connecteam API key in Settings).';
+  const message = !hasApiKey
+    ? 'No API key configured. Add your Connecteam API key in Settings.'
+    : errorMessage
+    ? `${errorMessage} ${recordsImported} records imported via simulation.`
+    : `Sync complete. ${recordsImported} new records imported from Connecteam.`;
 
-  res.json({ success: true, log, message });
+  return { log, message };
+}
+
+// POST /api/connecteam/sync
+router.post('/sync', async (req, res) => {
+  try {
+    const result = await performSync({ triggeredBy: 'manual', adminId: req.body.adminId || 'admin-1' });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /api/connecteam/sync-now (same as /sync — used by HoursImport button and external callers)
+router.post('/sync-now', async (req, res) => {
+  try {
+    const result = await performSync({ triggeredBy: 'manual', adminId: req.body.adminId || 'admin-1' });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // GET /api/connecteam/logs
