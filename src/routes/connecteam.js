@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { importedHours, connecteamSyncLogs, connecteamSettings, staffUsers } from '../data/seed.js';
+import { importedHours, connecteamSyncLogs, connecteamSettings, staffUsers, pointTransactions, referrals } from '../data/seed.js';
 
 const router = Router();
 
@@ -10,7 +10,7 @@ router.get('/settings', (req, res) => {
 
 // PUT /api/connecteam/settings
 router.put('/settings', (req, res) => {
-  const allowed = ['apiKey', 'organizationId', 'webhookUrl', 'syncFrequency', 'autoSync', 'shiftMultipliers'];
+  const allowed = ['apiKey', 'organizationId', 'webhookUrl', 'syncFrequency', 'autoSync', 'shiftMultipliers', 'pointsPerHour', 'referrerBonusPercentage'];
   for (const key of allowed) {
     if (key in req.body) connecteamSettings[key] = req.body[key];
   }
@@ -76,11 +76,45 @@ router.patch('/hours/:id', (req, res) => {
   importedHours[index].approvedBy = approvedBy || 'admin';
   if (status === 'rejected' && rejectionReason) importedHours[index].rejectionReason = rejectionReason;
 
-  // If approved: award points to the staff user
+  // If approved: award points to staff user + referrer bonus
   if (status === 'approved') {
     const userIndex = staffUsers.findIndex((u) => u.id === importedHours[index].userId);
     if (userIndex !== -1) {
-      staffUsers[userIndex].pointsBalance += importedHours[index].pointsToAward;
+      const hrs = importedHours[index];
+      staffUsers[userIndex].pointsBalance  += hrs.pointsToAward;
+      staffUsers[userIndex].approvedHours   = (staffUsers[userIndex].approvedHours || 0) + hrs.hoursWorked;
+
+      // Log employee points transaction
+      pointTransactions.unshift({
+        id: `PT-EMP-${Date.now()}`,
+        userId: staffUsers[userIndex].id,
+        type: 'hours_approved',
+        points: hrs.pointsToAward,
+        description: `${hrs.hoursWorked}h shift on ${hrs.shiftDate} (${hrs.shiftType}) approved`,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Award referrer bonus
+      const referredBy = staffUsers[userIndex].referredBy;
+      if (referredBy) {
+        const referrerIdx = staffUsers.findIndex((u) => u.id === referredBy);
+        if (referrerIdx !== -1) {
+          const bonusPct  = connecteamSettings.referrerBonusPercentage ?? 50;
+          const refBonus  = Math.round(hrs.pointsToAward * bonusPct / 100);
+          if (refBonus > 0) {
+            staffUsers[referrerIdx].pointsBalance += refBonus;
+            pointTransactions.unshift({
+              id: `PT-REF-${Date.now()}`,
+              userId: staffUsers[referrerIdx].id,
+              type: 'referrer_bonus',
+              points: refBonus,
+              description: `Referrer bonus: ${staffUsers[userIndex].firstName} ${staffUsers[userIndex].lastName} worked ${hrs.hoursWorked}h (${bonusPct}% of ${hrs.pointsToAward} pts)`,
+              relatedUserId: staffUsers[userIndex].id,
+              createdAt: new Date().toISOString(),
+            });
+          }
+        }
+      }
     }
   }
 
@@ -99,8 +133,43 @@ router.post('/hours/bulk-approve', (req, res) => {
       importedHours[index].status = 'approved';
       importedHours[index].approvedAt = new Date().toISOString();
       importedHours[index].approvedBy = approvedBy || 'admin';
-      const userIndex = staffUsers.findIndex((u) => u.id === importedHours[index].userId);
-      if (userIndex !== -1) staffUsers[userIndex].pointsBalance += importedHours[index].pointsToAward;
+
+      const hrs = importedHours[index];
+      const userIndex = staffUsers.findIndex((u) => u.id === hrs.userId);
+      if (userIndex !== -1) {
+        staffUsers[userIndex].pointsBalance += hrs.pointsToAward;
+        staffUsers[userIndex].approvedHours = (staffUsers[userIndex].approvedHours || 0) + hrs.hoursWorked;
+
+        pointTransactions.unshift({
+          id: `PT-EMP-${Date.now()}-${id}`,
+          userId: staffUsers[userIndex].id,
+          type: 'hours_approved',
+          points: hrs.pointsToAward,
+          description: `${hrs.hoursWorked}h shift on ${hrs.shiftDate} (bulk approved)`,
+          createdAt: new Date().toISOString(),
+        });
+
+        const referredBy = staffUsers[userIndex].referredBy;
+        if (referredBy) {
+          const referrerIdx = staffUsers.findIndex((u) => u.id === referredBy);
+          if (referrerIdx !== -1) {
+            const bonusPct = connecteamSettings.referrerBonusPercentage ?? 50;
+            const refBonus = Math.round(hrs.pointsToAward * bonusPct / 100);
+            if (refBonus > 0) {
+              staffUsers[referrerIdx].pointsBalance += refBonus;
+              pointTransactions.unshift({
+                id: `PT-REF-${Date.now()}-${id}`,
+                userId: staffUsers[referrerIdx].id,
+                type: 'referrer_bonus',
+                points: refBonus,
+                description: `Referrer bonus: ${staffUsers[userIndex].firstName} ${staffUsers[userIndex].lastName} worked ${hrs.hoursWorked}h`,
+                relatedUserId: staffUsers[userIndex].id,
+                createdAt: new Date().toISOString(),
+              });
+            }
+          }
+        }
+      }
       updated.push(importedHours[index]);
     }
   });
@@ -132,133 +201,106 @@ function shiftTypeFromDate(dateStr) {
 // ─── Core sync function (shared by /sync, /sync-now and the cron job) ─────────
 export async function performSync({ triggeredBy = 'manual', adminId = null } = {}) {
   const syncStart = Date.now();
-  const { professionRates } = await import('../data/seed.js');
-  const multiplierMap = connecteamSettings.shiftMultipliers || { regular: 1.0, overtime: 1.5, weekend: 2.0, public_holiday: 2.5 };
-  const apiKey = connecteamSettings.apiKey;
-  const hasApiKey = apiKey && apiKey.length >= 10;
+  const multiplierMap  = connecteamSettings.shiftMultipliers || { regular: 1.0, overtime: 1.5, weekend: 2.0, public_holiday: 2.5 };
+  const pointsPerHour  = connecteamSettings.pointsPerHour ?? 10;
+  const apiKey         = connecteamSettings.apiKey;
+  const hasApiKey      = apiKey && apiKey.length >= 10;
 
   let recordsFetched = 0, recordsImported = 0, recordsFailed = 0;
   let errorMessage = null;
 
   if (hasApiKey) {
+    // Sync window: last 7 days
+    const endDate   = new Date().toISOString().split('T')[0];
+    const startDate = (() => { const d = new Date(); d.setDate(d.getDate() - 7); return d.toISOString().split('T')[0]; })();
+
+    const activeStaff = staffUsers.filter(u => u.connecteamUserId && u.isActive);
+    const ctUserIds   = activeStaff.map(u => u.connecteamUserId);
+
     try {
-      const clocksRes = await connecteamFetch('/time-clock/v1/time-clocks', apiKey);
-      const timeClocks = clocksRes?.data?.timeClocks || clocksRes?.data || [];
+      const clocksRes  = await connecteamFetch('/time-clock/v1/time-clocks', apiKey);
+      const timeClocks = clocksRes?.data?.timeClocks || [];
 
       if (timeClocks.length === 0) {
-        // No time clocks set up — simulate for real staff only
-        errorMessage = 'API key valid but no time clocks found. Simulating shifts for real staff.';
-        const shiftTypes = ['regular', 'overtime', 'weekend', 'public_holiday'];
-        const today = new Date();
-        const realStaff = staffUsers.filter(u => u.connecteamUserId && typeof u.connecteamUserId === 'number' && u.isActive);
-        realStaff.forEach((user) => {
-          const shiftType = shiftTypes[Math.floor(Math.random() * shiftTypes.length)];
-          const hours = parseFloat((Math.random() * 6 + 2).toFixed(2));
-          const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
-          const multiplier = multiplierMap[shiftType] || 1.0;
-          const pointsToAward = Math.round(hours * user.hourlyRate * professionRate * multiplier);
-          const shiftDate = new Date(today);
-          shiftDate.setDate(shiftDate.getDate() - Math.floor(Math.random() * 3));
-          const dateStr = shiftDate.toISOString().split('T')[0];
-          if (!importedHours.find(h => h.userId === user.id && h.shiftDate === dateStr)) {
-            importedHours.unshift({
-              id: `IH-REAL-${Date.now()}-${user.id}`,
-              userId: user.id, userName: `${user.firstName} ${user.lastName}`,
-              classification: user.classification, connecteamUserId: user.connecteamUserId,
-              shiftDate: dateStr,
-              clockIn: '07:00', clockOut: `${7 + Math.floor(hours)}:${String(Math.round((hours % 1) * 60)).padStart(2, '0')}`,
-              hoursWorked: hours, shiftType, multiplier, hourlyRate: user.hourlyRate,
-              professionRate, pointsToAward, status: 'pending',
-              approvedBy: null, approvedAt: null, rejectionReason: null,
-              connecteamShiftId: `real-sim-${Date.now()}-${user.id}`,
-              importedAt: new Date().toISOString(),
-            });
-            recordsImported++;
-          }
-          recordsFetched++;
-        });
+        errorMessage = 'No time clocks found in Connecteam. Please set up a time clock in your Connecteam dashboard.';
         connecteamSettings.isConnected = true;
       } else {
         for (const clock of timeClocks) {
-          const activitiesRes = await connecteamFetch(
-            `/time-clock/v1/time-clocks/${clock.id}/time-activities?limit=100`,
-            apiKey
-          );
-          const activities = activitiesRes?.data?.timeActivities || activitiesRes?.data || [];
-          recordsFetched += activities.length;
+          // Build query: date range + all known user IDs
+          const params = new URLSearchParams({ startDate, endDate, limit: '1000' });
+          ctUserIds.forEach(id => params.append('userIds[]', String(id)));
 
-          for (const activity of activities) {
-            try {
-              const ctUserId = activity.userId;
-              const startTs = activity.timeActivity?.start?.timestamp;
-              const endTs = activity.timeActivity?.end?.timestamp;
-              if (!startTs || !endTs) continue;
+          let activitiesRes;
+          try {
+            activitiesRes = await connecteamFetch(
+              `/time-clock/v1/time-clocks/${clock.timeClockId ?? clock.id}/time-activities?${params.toString()}`,
+              apiKey
+            );
+          } catch (clockErr) {
+            console.warn(`[Sync] Clock ${clock.timeClockId ?? clock.id} fetch error:`, clockErr.message);
+            recordsFailed++;
+            continue;
+          }
 
-              const activityId = activity.timeActivity?.id || `ct-${ctUserId}-${startTs.split('T')[0]}`;
-              if (importedHours.find(h => h.connecteamShiftId === activityId)) continue;
+          // Response format: { data: { timeActivitiesByUsers: { "userId": { shifts: [{ start: {timestamp}, end: {timestamp} }] } } } }
+          const activitiesByUser = activitiesRes?.data?.timeActivitiesByUsers || {};
 
-              const user = staffUsers.find(u => String(u.connecteamUserId) === String(ctUserId));
-              if (!user) continue;
+          for (const [ctUserIdStr, userData] of Object.entries(activitiesByUser)) {
+            const ctUserId = parseInt(ctUserIdStr);
+            const user = activeStaff.find(u => u.connecteamUserId === ctUserId);
+            if (!user) continue;
 
-              const shiftDate = startTs.split('T')[0];
-              const ms = new Date(endTs) - new Date(startTs);
-              const hoursWorked = parseFloat((ms / 3600000).toFixed(2));
-              const shiftType = shiftTypeFromDate(shiftDate);
-              const multiplier = multiplierMap[shiftType] || 1.0;
-              const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
-              const pointsToAward = Math.round(hoursWorked * user.hourlyRate * professionRate * multiplier);
+            const shifts = userData.shifts || [];
+            recordsFetched += shifts.length;
 
-              importedHours.unshift({
-                id: `IH-CT-${Date.now()}-${user.id}`,
-                userId: user.id, userName: `${user.firstName} ${user.lastName}`,
-                classification: user.classification, connecteamUserId: ctUserId,
-                shiftDate, clockIn: startTs.split('T')[1]?.slice(0, 5) || '00:00',
-                clockOut: endTs.split('T')[1]?.slice(0, 5) || '00:00',
-                hoursWorked, shiftType, multiplier, hourlyRate: user.hourlyRate,
-                professionRate, pointsToAward, status: 'pending',
-                approvedBy: null, approvedAt: null, rejectionReason: null,
-                connecteamShiftId: activityId, importedAt: new Date().toISOString(),
-              });
-              recordsImported++;
-            } catch (_) { recordsFailed++; }
+            for (const shift of shifts) {
+              try {
+                const startTs = shift.start?.timestamp;
+                const endTs   = shift.end?.timestamp;
+                if (!startTs || !endTs || endTs <= startTs) continue;
+
+                const shiftId = `ct-${ctUserId}-${startTs}`;
+                if (importedHours.find(h => h.connecteamShiftId === shiftId)) continue;
+
+                const startDt  = new Date(startTs * 1000);
+                const endDt    = new Date(endTs   * 1000);
+                const hoursWorked = parseFloat(((endTs - startTs) / 3600).toFixed(2));
+                const shiftDateStr = startDt.toISOString().split('T')[0];
+                const shiftType    = shiftTypeFromDate(shiftDateStr);
+                const multiplier   = multiplierMap[shiftType] || 1.0;
+                const pointsToAward = Math.round(hoursWorked * pointsPerHour * multiplier);
+
+                importedHours.unshift({
+                  id: `IH-CT-${Date.now()}-${user.id}`,
+                  userId: user.id,
+                  userName: `${user.firstName} ${user.lastName}`,
+                  classification: user.classification,
+                  connecteamUserId: ctUserId,
+                  shiftDate: shiftDateStr,
+                  clockIn:  `${startDt.getHours().toString().padStart(2,'0')}:${startDt.getMinutes().toString().padStart(2,'0')}`,
+                  clockOut: `${endDt.getHours().toString().padStart(2,'0')}:${endDt.getMinutes().toString().padStart(2,'0')}`,
+                  hoursWorked,
+                  shiftType,
+                  multiplier,
+                  hourlyRate: user.hourlyRate,
+                  pointsPerHour,
+                  pointsToAward,
+                  status: 'pending',
+                  approvedBy: null, approvedAt: null, rejectionReason: null,
+                  connecteamShiftId: shiftId,
+                  importedAt: new Date().toISOString(),
+                });
+                recordsImported++;
+              } catch (_) { recordsFailed++; }
+            }
           }
         }
         connecteamSettings.isConnected = true;
       }
     } catch (err) {
       console.error('[Connecteam sync] API error:', err.message);
-      errorMessage = `API error: ${err.message}. Falling back to simulation.`;
-
-      // Fallback simulation using active real staff only
-      const shiftTypes = ['regular', 'overtime', 'weekend', 'public_holiday'];
-      const today = new Date();
-      const realStaff = staffUsers.filter(u => u.connecteamUserId && typeof u.connecteamUserId === 'number' && u.isActive);
-      const eligible = realStaff.length > 0 ? realStaff : staffUsers.filter(u => u.isActive).slice(0, 4);
-      for (const user of eligible) {
-        const shiftType = shiftTypes[Math.floor(Math.random() * shiftTypes.length)];
-        const hours = parseFloat((Math.random() * 6 + 2).toFixed(2));
-        const professionRate = professionRates.find(p => p.classification === user.classification)?.cashPerPoint || 0.5;
-        const multiplier = multiplierMap[shiftType] || 1.0;
-        const pointsToAward = Math.round(hours * user.hourlyRate * professionRate * multiplier);
-        const shiftDate = new Date(today);
-        shiftDate.setDate(shiftDate.getDate() - Math.floor(Math.random() * 3));
-        const dateStr = shiftDate.toISOString().split('T')[0];
-        if (!importedHours.find(h => h.userId === user.id && h.shiftDate === dateStr)) {
-          importedHours.unshift({
-            id: `IH-SIM-${Date.now()}-${user.id}`,
-            userId: user.id, userName: `${user.firstName} ${user.lastName}`,
-            classification: user.classification, connecteamUserId: user.connecteamUserId,
-            shiftDate: dateStr, clockIn: '07:00',
-            clockOut: `${7 + Math.floor(hours)}:${String(Math.round((hours % 1) * 60)).padStart(2, '0')}`,
-            hoursWorked: hours, shiftType, multiplier, hourlyRate: user.hourlyRate,
-            professionRate, pointsToAward, status: 'pending',
-            approvedBy: null, approvedAt: null, rejectionReason: null,
-            connecteamShiftId: `sim-${Date.now()}-${user.id}`, importedAt: new Date().toISOString(),
-          });
-          recordsImported++;
-        }
-        recordsFetched++;
-      }
+      errorMessage = `Connecteam API error: ${err.message}`;
+      connecteamSettings.isConnected = false;
     }
   }
 

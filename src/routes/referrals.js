@@ -117,11 +117,18 @@ router.get('/tree/:userId', (req, res) => {
 
 // POST /api/referrals/register-referee — register a new staff member via referral
 router.post('/register-referee', async (req, res) => {
-  const { refereeName, refereeEmail, refereePhone, classification, referrerCode, referrerId } = req.body;
+  const { refereeName, refereeEmail, refereePhone, classification, referrerCode, referrerId, gender, dob, department, startDate } = req.body;
 
   // Validate required fields
-  if (!refereeName || !refereeEmail || !refereePhone || !classification) {
-    return res.status(400).json({ error: 'refereeName, refereeEmail, refereePhone and classification are required' });
+  if (!refereeName || !refereeEmail || !refereePhone || !classification || !dob) {
+    return res.status(400).json({ error: 'refereeName, refereeEmail, refereePhone, classification and dob are required' });
+  }
+
+  // Validate phone: must be AU (+61xxxxxxxxx) or UK (+44xxxxxxxxxx) international format
+  const phoneRegex = /^\+(?:61[2-9]\d{8}|44[1-9]\d{9})$/;
+  const cleanPhone = refereePhone.replace(/[\s\-()]/g, '');
+  if (!phoneRegex.test(cleanPhone)) {
+    return res.status(400).json({ error: 'Phone must be in Australian (+61xxxxxxxxx) or UK (+44xxxxxxxxxx) international format' });
   }
 
   // Check duplicate email
@@ -170,12 +177,15 @@ router.post('/register-referee', async (req, res) => {
     lastName,
     email: refereeEmail.toLowerCase().trim(),
     password,
-    phone: refereePhone,
+    phone: cleanPhone,
+    gender: gender || null,
+    dob: dob || null,
+    department: department || null,
     classification,
     department: 'General',
     position: classification,
     location: '',
-    joinDate: new Date().toISOString().split('T')[0],
+    joinDate: startDate || new Date().toISOString().split('T')[0],
     isActive: true,
     pointsBalance: 0,
     totalReferrals: 0,
@@ -185,20 +195,30 @@ router.post('/register-referee', async (req, res) => {
     referralCode,
     referredBy: referrer?.id ?? null,
     connecteamUserId: null,
+    kioskCode: null,
     avatar: `https://i.pravatar.cc/150?img=${newId}`,
     lastActiveDate: new Date().toISOString().split('T')[0],
     bankAccount: null,
   };
 
-  // Create Connecteam account (mocked until API supports user creation)
+  // Create Connecteam account via real API
   let connecteamResult = { success: false, connecteamUserId: null, message: 'No API key configured' };
   if (connecteamSettings.apiKey) {
     try {
       connecteamResult = await createConnecteamUser(connecteamSettings.apiKey, {
-        firstName, lastName, email: refereeEmail, phone: refereePhone, role: classification,
+        firstName,
+        lastName,
+        email:          refereeEmail,
+        phoneNumber:    cleanPhone,
+        gender:         gender      || undefined,
+        dob:            dob         || undefined,
+        classification: classification,
+        department:     department  || undefined,
+        joinDate:       startDate || new Date().toISOString().split('T')[0],
       });
       if (connecteamResult.connecteamUserId) {
         newUser.connecteamUserId = connecteamResult.connecteamUserId;
+        newUser.kioskCode        = connecteamResult.kioskCode ?? null;
       }
     } catch (err) {
       connecteamResult = { success: false, message: err.message };

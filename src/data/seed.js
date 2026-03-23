@@ -150,4 +150,8 @@ export const connecteamSettings = {
   isConnected: false,
   autoSync: true,
   shiftMultipliers: { regular: 1.0, overtime: 1.5, weekend: 2.0, public_holiday: 2.5 },
+  // Points awarded per hour worked (employee earns this)
+  pointsPerHour: 10,
+  // Percentage of employee's points that the referrer also earns (50 = referrer gets 5pts per 10pts employee earns)
+  referrerBonusPercentage: 50,
 };
