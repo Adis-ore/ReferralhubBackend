@@ -141,6 +141,20 @@ export const systemSettings = {
   retentionYears: 5,
 };
 
+// ── Brevity settings & sync logs ──────────────────────────────────────────────
+export const brevitySyncLogs = [];
+
+export const brevitySettings = {
+  // ── FILL IN ONCE CREDENTIALS ARE CONFIRMED ──────────────────────────────────
+  companyCode: process.env.BREVITY_COMPANY_CODE || '', // e.g. 'paramountcare'
+  apiKey:      process.env.BREVITY_API_KEY      || '', // long API key from Brevity System Setup
+  // ─────────────────────────────────────────────────────────────────────────────
+  syncFrequency: 'daily',
+  lastSync:      null,
+  isConnected:   false,
+  autoSync:      true,
+};
+
 export const connecteamSettings = {
   apiKey: process.env.CONNECTEAM_API_KEY || '',
   organizationId: process.env.CONNECTEAM_ORG_ID || '',

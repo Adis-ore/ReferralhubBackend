@@ -13,6 +13,7 @@ import pointsRoutes from './routes/points.js';
 import settingsRoutes from './routes/settings.js';
 import auditLogRoutes from './routes/auditLogs.js';
 import connecteamRoutes, { performSync } from './routes/connecteam.js';
+import brevityRoutes, { performBrevitySync } from './routes/brevity.js';
 import programRoutes from './routes/programs.js';
 import notificationRoutes from './routes/notifications.js';
 import reportRoutes from './routes/reports.js';
@@ -53,6 +54,7 @@ app.use('/api/points', pointsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
 app.use('/api/connecteam', connecteamRoutes);
+app.use('/api/brevity', brevityRoutes);
 app.use('/api/programs', programRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
@@ -86,12 +88,22 @@ cron.schedule('0 2 * * *', async () => {
   console.log('[Cron] Running daily Connecteam sync...');
   try {
     const { log, message } = await performSync({ triggeredBy: 'scheduled', adminId: null });
-    console.log(`[Cron] ${message} (${log.recordsImported} imported)`);
+    console.log(`[Cron] Connecteam: ${message} (${log.recordsImported} imported)`);
   } catch (err) {
-    console.error('[Cron] Sync failed:', err.message);
+    console.error('[Cron] Connecteam sync failed:', err.message);
   }
 });
-console.log('[Cron] Daily sync scheduled at 2:00 AM');
+
+cron.schedule('0 2 * * *', async () => {
+  console.log('[Cron] Running daily Brevity sync...');
+  try {
+    const { log, message } = await performBrevitySync({ triggeredBy: 'scheduled', adminId: null });
+    console.log(`[Cron] Brevity: ${message} (${log.recordsImported} imported)`);
+  } catch (err) {
+    console.error('[Cron] Brevity sync failed:', err.message);
+  }
+});
+console.log('[Cron] Daily syncs scheduled at 2:00 AM (Connecteam + Brevity)');
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
